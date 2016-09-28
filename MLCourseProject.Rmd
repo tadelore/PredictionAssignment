@@ -1,0 +1,278 @@
+---
+title: "Machine Learning Course Project"
+author: "Temi A. Sorungbe"
+date: "September 20, 2016"
+output: html_document
+---
+
+##Summary
+This project analyzes the wearable computing dataset- a large amount of data quantifying how well people execute their personal fitness activity . Specifically, data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants are recorded while they perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+The cross validated random forest model best predicts how well each participants executes the barbell lifts and was selected as the final predictive model for the wearable computing dataset.
+
+This model was selected after preprocessing the train dataset to select key features and comparing prediction accuracy of linear discriminant analysis (lda), quadratic discriminant analysis (qda) and classification and regression tree (CART) methods- rpart and random forest.
+
+The validation data (out of sample) errors were equal to or higher than the train data (in sample) errors for all prediction models.
+
+```{r download data, echo=FALSE, cache.vars=TRUE, warning=FALSE, message=FALSE}
+#download training dataset
+setwd("C:/Users/datacent52/Documents/Temilade Adelore_Office/DataScienceCourse/MachineLearning/PredictionAssignment")
+
+#load libraries
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(plyr)
+library(lubridate)
+library(gridExtra)
+library(rattle)
+library(rpart, quietly = T)
+library(randomForest, quietly = T)
+
+#url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+#url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+     
+#train <- download.file(url_train,"training.csv")
+#test <- download.file(url_test,"testing.csv")
+
+#upload all variables as is except username, new_window and classe (upload these as factor variables)
+train <- read.csv("training.csv", na.strings = "#DIV/0!", as.is=c(1,3:5,7:159))
+
+# create validation data set using Train 
+inTrain <- createDataPartition(y=train$classe, p=0.7, list=FALSE)
+train <- train[inTrain,]
+val <- train[-inTrain,]
+
+#create testing dataset
+test <- read.csv("testing.csv", na.strings = "#DIV/0!", as.is=c(1,3:5,7:159))
+
+#str(training)
+```
+
+#Pre-processing
+The following steps were carried out on the train, validation and test dataset:
+
+1. Selecting features from the training dataset to be used for predictions by:
+i. removing variables with high missingness (> 95%) 
+ii. removing near zero variance variables
+iii. removing highly correlated variables (ie. correlations > 0.75)
+
+2. Centering and scaling all variables except "classe"
+
+```{r preprocess data, echo=FALSE, warning= FALSE, message=FALSE}
+
+#select suitable features with the following preprocessing steps 
+#remove s/n, username, cvtd_timestamp variables 
+train = train[,-c(1,2,5)]
+
+#identify variables with high missingness (>=95%)
+na_index = NULL
+for (n in 1:length(train)) {
+        if (sum(is.na(train[,n])) >= round(0.95*dim(train)[1])){
+                na_index = c(na_index, n) }
+}
+train = train[,-na_index]
+
+#identify near zero variance (nzv) variables
+nzv <- nearZeroVar(train, saveMetrics = TRUE)
+nzv_index = which(nzv$nzv == TRUE) 
+nnzv <- names(train [,-nzv_index])
+
+#filter out nzv variables 
+train  = train[,nnzv]
+
+#filter out highly correlated variables (correlation > 0.75)
+#estimate correlations among leftover varaibles except the classe variable
+index = which(names(train) == "classe")
+ts_cr <- cor(train[,-index], use = "complete.obs")
+ts_hcr <- findCorrelation(ts_cr, cutoff = 0.75)
+nts_hcr <- names(train [,-ts_hcr])
+train  = train[,nts_hcr]
+
+#select these feature variables in the validation and test dataset
+index_features <- which((names(val) %in% names(train)) ==TRUE)
+val <- val[,index_features]
+
+index_features <- which((names(test) %in% names(train)) ==TRUE)
+test <- test[,index_features]
+
+#center and scale selected features in training and testing dataset except factor variables username, dvn_timestamp and classe variables
+set.seed(123)
+index = which(names(train) %in% c("classe"))
+ppv <- preProcess(train[,-index], method = c("center", "scale"))
+ppv_train <- predict(ppv, train)
+ppv_val <- predict(ppv, val)
+ppv_test <- predict(ppv, test)
+
+```
+
+#Explore the data 
+The following plots display the relationships between selected features and the classe variables in the train dataset.
+
+```{r explore data, echo=FALSE, message=FALSE, warning=FALSE}
+#check to see if there are any interesting patterns in the data
+count = seq(1,dim(ppv_test)[2],5)
+p = list()
+
+for (n in count) {
+        if (n < count[length(count)]) {
+        pnew = featurePlot(x = ppv_train[,c(n:(n+4))],
+                y = ppv_train$classe,
+                plot = "pairs",
+                ## Add a key at the top
+                auto.key = list(columns = 5)) } 
+else {
+        pnew = featurePlot(x = ppv_train[,c(n:dim(ppv_test)[2])],
+                y = train$classe,
+                plot = "pairs",
+                ## Add a key at the top
+                auto.key = list(columns = (dim(ppv_test)[2]-n+1)))}
+        
+        p = append(p, list(pnew))
+}
+
+#print plots        
+for (n in seq(1,length(count)+2,2)) {
+        if (length(count)%%2 == 0)
+                {grid.arrange(p[[n]], p[[n+1]], ncol=2)}
+        
+        if (length(count)%%2 != 0) {
+                if (n == length(count)) {p[[length(count)]]}
+                else if (n < length(count)) {grid.arrange(p[[n]], p[[n+1]], ncol=2)}
+        }
+}
+                
+```
+
+##Modelling, model assessment and model selection
+The "classe" variable will be predicted using the following classification methods:
+
+1. linear discriminat analysis (assuming common variance across classes) 
+2. quadratic discriminat analysis (assuming class specific variance)
+3. classification and regression trees (rpart and random forests)
+
+In addition a 10 fold cross validation method is used and out of sample error is calculated for final model selection. __I expect the "out of sample"" error to be greater than the "in sample error"__ in all models.
+
+```{r cross validation, echo=FALSE, message=FALSE, warning=FALSE}
+
+#linear discriminat analysis model 
+#use all variables except classe variables in features 
+set.seed(123)
+
+accuracy_trainlda = NULL
+accuracy_testlda  = NULL
+
+for (n in 1:5) {
+        lda_cvfit <- train(classe ~ ., method = "lda", data = ppv_train,   
+                           trControl=trainControl(method="cv", 10))
+        
+        #get training error
+        accuracy_trainlda <- c(accuracy_trainlda, lda_cvfit$results[2])
+        
+        #predict validation dataset
+        cvt_lda <- predict(lda_cvfit, ppv_val)
+        
+        #determine accuracy of validation dataset
+        cM_cvlda <- confusionMatrix(cvt_lda,ppv_val$classe)
+        accuracy_testlda <- c(accuracy_testlda,cM_cvlda$overall[1])
+}
+accuracy_trainlda = unlist(accuracy_trainlda)
+maccuracy_testlda = mean(accuracy_testlda)
+
+#quadratic discriminat analysis model 
+#use all variables except classe variables in features 
+accuracy_trainqda  = NULL
+accuracy_testqda  = NULL
+
+for (n in 1:5) {
+        qda_cvfit <- train(classe ~ ., method = "qda", data = ppv_train, 
+                           trControl=trainControl(method="cv", 10))
+        
+        #get training error
+        accuracy_trainqda <- c(accuracy_trainqda, qda_cvfit$results[2])
+
+        #predict validation dataset
+        cvt_qda <- predict(qda_cvfit, ppv_val)
+        
+        #determine accuracy of validation dataset
+        cM_cvqda <- confusionMatrix(cvt_qda,ppv_val$classe)
+        accuracy_testqda <- c(accuracy_testqda,cM_cvqda$overall[1])
+}
+accuracy_trainqda = unlist(accuracy_trainqda)
+maccuracy_testqda = mean(accuracy_testqda)
+
+#tree based models (rpart and random forests)
+#use all variables except classe variables in features 
+accuracy_trainrp  = NULL
+accuracy_testrp  = NULL
+
+for (n in 1:5) {
+        rp_cvfit <- train(classe ~ ., method = "rpart", data = ppv_train,
+                          trControl=trainControl(method="cv", 10))
+        
+        #get training error
+        accuracy_trainrp <- c(accuracy_trainrp, max(rp_cvfit$results[2]))
+        
+        #predict on the validation dataset
+        cvt_rp <- predict(rp_cvfit, ppv_val)
+        
+        #determine accuracy of validation dataset
+        cM_cvrp <- confusionMatrix(cvt_rp,ppv_val$classe)
+        accuracy_testrp <- c(accuracy_testrp,cM_cvrp$overall[1])
+}
+maccuracy_testrp = mean(accuracy_testrp)
+
+
+#random forests 
+accuracy_trainrf = NULL
+accuracy_testrf  = NULL
+
+for (n in 1:5) {
+        rf_cvfit <- train(classe ~ ., data=ppv_train, method="rf", 
+                 trControl=trainControl(method="cv", 10), ntree=250)
+                          
+        #get training error
+        accuracy_trainrf <- c(accuracy_trainrf, max(rf_cvfit$results[2]))
+        
+        #predict on validation dataset
+        cvt_rf <- predict(rf_cvfit, ppv_val)
+        
+        #determine accuracy of validation dataset
+        cM_cvrf <- confusionMatrix(cvt_rf,ppv_val$classe)
+        accuracy_testrf <- c(accuracy_testrf,cM_cvrf$overall[1])
+}
+maccuracy_testrf = mean(accuracy_testrf)
+
+```
+
+#Results
+```{r results, echo=FALSE, message=FALSE, warning=FALSE}
+
+plot(NA, ylab = "", xlab ="", xlim =c(1,7.5), ylim=c(0,1))
+points(1:5, accuracy_trainlda, type="b", lty =1, pch=0,  col = "red")
+points(1:5,  accuracy_trainqda, type="b", lty=2,   pch=1, col = "black")
+points(1:5,  accuracy_trainrp, type="b", lty=3, pch=2,  col = "blue")
+points(1:5,  accuracy_trainrf, type="b", lty=4, pch=5,  col = "green")
+title(main = "Cross validation Accuracy", ylab = "Accuracy", xlab = "Iteration")
+
+points(1:5, accuracy_testlda, type="b", lty =1, pch=15,  col = "red")
+points(1:5,  accuracy_testqda, type="b", lty=2,  pch=16, col = "black")
+points(1:5,  accuracy_testrp, type="b", lty=3, pch=17,  col = "blue")
+points(1:5,  accuracy_testrf, type="b", lty=4, pch=18,  col = "green")
+
+legend(6, 0.9, c("train_lda", "test_lda", "train_qda", "test_qda", "train_rpart", "test_rpart", "train_rf", "test_rf"), pch =c(0,15, 1,16, 2,17, 5,18), lty = c(1,1, 2,2, 3,3, 4,4), col = c("red", "red", "black", "black", "blue", "blue", "green", "green"))
+#dev.off()
+```
+
+#Final model
+The random forest model gives the most accurate prediction of the classe variable in the validation dataset with an average prediction accuracy (across 5 iterations) of __`r maccuracy_testrf`__ versus __`r maccuracy_testlda`__ from the linear discriminant analysis model,  __`r maccuracy_testqda`__ from the quadratic discriminant analysis model, and __`r maccuracy_testrp`__ from the classification and regression trees model (rpart). 
+
+
+```{r prediction, echo=FALSE, message=FALSE, warning=FALSE}
+#predict on testing dataset
+testdata_classe <- predict(rf_cvfit, ppv_test)
+write.csv(testdata_classe, "testdata_predictions.csv")
+```
+
+#Predictions
+Random forest model predictions on the test dataset are: `r testdata_classe`
